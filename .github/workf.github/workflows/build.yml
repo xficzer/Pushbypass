@@ -1,0 +1,152 @@
+name: Build PushBypass
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.12
+      - name: Create project
+        run: |
+          mkdir -p work && cd work
+          mkdir -p $(dirname build.gradle)
+          cat > build.gradle <<'EOF_0'
+          plugins {
+              id 'fabric-loom' version '1.9-SNAPSHOT'
+          }
+          version = project.mod_version
+          group = 'pl.example'
+          base { archivesName = 'pushbypass' }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') { expand 'version': project.version }
+          }
+
+          tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+          java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+          EOF_0
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_1'
+          org.gradle.jvmargs=-Xmx1G
+          minecraft_version=1.21.4
+          yarn_mappings=1.21.4+build.8
+          loader_version=0.16.10
+          fabric_version=0.119.3+1.21.4
+          mod_version=1.0.0
+          EOF_1
+          mkdir -p $(dirname settings.gradle)
+          cat > settings.gradle <<'EOF_2'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'pushbypass'
+          EOF_2
+          mkdir -p $(dirname src/main/java/pl/example/pushbypass/PushBypassClient.java)
+          cat > src/main/java/pl/example/pushbypass/PushBypassClient.java <<'EOF_3'
+          package pl.example.pushbypass;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.text.Text;
+          import org.lwjgl.glfw.GLFW;
+
+          public class PushBypassClient implements ClientModInitializer {
+              public static boolean enabled = true;
+              private static KeyBinding toggleKey;
+
+              @Override
+              public void onInitializeClient() {
+                  toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.pushbypass.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K, "category.pushbypass"));
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      while (toggleKey.wasPressed()) {
+                          enabled = !enabled;
+                          if (client.player != null) {
+                              client.player.sendMessage(Text.literal("PushBypass: " + (enabled ? "ON" : "OFF")), true);
+                          }
+                      }
+                  });
+              }
+          }
+          EOF_3
+          mkdir -p $(dirname src/main/java/pl/example/pushbypass/mixin/EntityPredicatesMixin.java)
+          cat > src/main/java/pl/example/pushbypass/mixin/EntityPredicatesMixin.java <<'EOF_4'
+          package pl.example.pushbypass.mixin;
+
+          import java.util.function.Predicate;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.predicate.entity.EntityPredicates;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+          import pl.example.pushbypass.PushBypassClient;
+
+          /** Pomija sprawdzanie CollisionRule druzyn przy liczeniu, kto moze popychac lokalnego gracza. */
+          @Mixin(EntityPredicates.class)
+          public abstract class EntityPredicatesMixin {
+              @Inject(method = "canBePushedBy", at = @At("HEAD"), cancellable = true)
+              private static void pushbypass$ignoreTeamRule(Entity entity, CallbackInfoReturnable<Predicate<Entity>> cir) {
+                  if (PushBypassClient.enabled && entity instanceof ClientPlayerEntity) {
+                      cir.setReturnValue(other -> !other.isSpectator() && other.isPushable());
+                  }
+              }
+          }
+          EOF_4
+          mkdir -p $(dirname src/main/resources/assets/pushbypass/lang/en_us.json)
+          cat > src/main/resources/assets/pushbypass/lang/en_us.json <<'EOF_5'
+          { "key.pushbypass.toggle": "Toggle PushBypass", "category.pushbypass": "PushBypass" }
+          EOF_5
+          mkdir -p $(dirname src/main/resources/fabric.mod.json)
+          cat > src/main/resources/fabric.mod.json <<'EOF_6'
+          {
+            "schemaVersion": 1,
+            "id": "pushbypass",
+            "version": "${version}",
+            "name": "PushBypass",
+            "description": "Ignoruje regule kolizji druzyn (collisionRule) po stronie klienta. Klawisz K wlacza/wylacza.",
+            "environment": "client",
+            "entrypoints": { "client": ["pl.example.pushbypass.PushBypassClient"] },
+            "mixins": ["pushbypass.mixins.json"],
+            "depends": { "fabricloader": ">=0.16.0", "minecraft": "~1.21.4", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF_6
+          mkdir -p $(dirname src/main/resources/pushbypass.mixins.json)
+          cat > src/main/resources/pushbypass.mixins.json <<'EOF_7'
+          {
+            "required": true,
+            "package": "pl.example.pushbypass.mixin",
+            "compatibilityLevel": "JAVA_21",
+            "client": ["EntityPredicatesMixin"],
+            "injectors": { "defaultRequire": 1 }
+          }
+          EOF_7
+      - name: Build
+        run: cd work && gradle build --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pushbypass-jar
+          path: work/build/libs/pushbypass-1.0.0.jar
